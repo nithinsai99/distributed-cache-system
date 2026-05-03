@@ -1,57 +1,151 @@
-# High-Performance Distributed Cache (ASP.NET Core, Redis, Docker)
+# High-Performance Distributed Cache
 
-This workspace contains a minimal scaffold for a distributed cache microservice using .NET 8, Redis, Serilog, and Docker. The layout follows SOLID principles with separate `Core`, `Infrastructure`, and `Api` projects.
+This is a small cache service built with ASP.NET Core, Redis, Serilog, and Docker. The code is split into three parts so it stays easy to follow:
 
-Quick start (requires Docker and .NET 8 SDK):
+- `Cache.Api` handles HTTP requests.
+- `Cache.Core` defines the cache contract.
+- `Cache.Infrastructure` talks to Redis.
 
-```bash
-# build & run services
-docker-compose up --build
-```
+## What this app does
 
-API is available at http://localhost:5001 (Swagger at /swagger when in Development).
+In simple terms, the API lets you save, read, and delete values by key. Anything you send is stored in Redis as JSON and turned back into an object when you read it again.
 
-Detailed behavior
------------------
+The app also includes a few practical extras:
 
-- Request throttling: The API includes `RequestThrottlingMiddleware` (`src/Cache.Api/Middleware/RequestThrottlingMiddleware.cs`). It limits requests per client IP to 100 requests per 1 second window. When the limit is exceeded the middleware returns HTTP 429 `Too many requests` and does not pass the request to application code.
+- request throttling so one client cannot spam the API,
+- Serilog logging with Seq,
+- Docker Compose for running everything locally,
+- Redis Commander so you can look at Redis data in a browser.
 
-- Seq: The local logging service uses the `datalust/seq` image. To allow Seq to initialize automatically the compose file sets `ACCEPT_EULA=Y` and `SEQ_FIRSTRUN_ADMINPASSWORD`. The stack brings up `seq` on host port `5341` and the API is configured to send logs to `http://seq:5341` inside Docker.
+## Quick start
 
-How to reproduce the rate-limit (quick test)
-------------------------------------------
-
-1. Start the stack:
+Run the whole stack with Docker Compose:
 
 ```bash
 docker-compose up --build
 ```
 
-2. The API runs in Development mode and serves Swagger at `http://localhost:5001/swagger`.
+When it is up, these are the useful URLs:
 
-3. To trigger the throttling, run the provided script which will rapidly issue many requests from your host IP and report response codes. The middleware counts requests per IP, so running all requests from your machine will hit the limit.
+- API: http://localhost:5001
+- Swagger UI: http://localhost:5001/swagger
+- Seq: http://localhost:5341
+- Redis Commander: http://localhost:8081
 
-Example (run the test script):
+## What runs in Docker Compose
+
+The compose file starts four services:
+
+- `redis` stores the cached data.
+- `seq` collects and shows logs.
+- `redis-commander` gives you a browser UI for Redis.
+- `api` is the ASP.NET Core cache API.
+
+## API endpoints
+
+The cache controller is small on purpose. It exposes these routes:
+
+- `GET /api/cache/{key}` reads a value.
+- `POST /api/cache/{key}` stores a value.
+- `DELETE /api/cache/{key}` removes a value.
+
+Example POST request:
 
 ```bash
-# send 200 rapid requests to GET /api/cache/testkey
+curl -X POST http://localhost:5001/api/cache/user:1 \
+  -H "Content-Type: application/json" \
+  -d '{"id":1,"name":"Alice","status":"active"}'
+```
+
+Example GET request:
+
+```bash
+curl http://localhost:5001/api/cache/user:1
+```
+
+## How caching works
+
+The `RedisCacheService` stores values in Redis as JSON strings. When the API reads a key, it pulls the string back out and deserializes it into the requested type.
+
+The cache contract lives in [src/Cache.Core/Interfaces/ICacheService.cs](src/Cache.Core/Interfaces/ICacheService.cs).
+
+## Request throttling
+
+`RequestThrottlingMiddleware` keeps the API from being hammered by too many requests from the same IP.
+
+It is set to:
+
+- allow 100 requests,
+- count them over a 1 second window,
+- return HTTP 429 `Too many requests` once the limit is reached.
+
+To see it in action, run:
+
+```bash
 bash tests/hit_rate_limit.sh http://localhost:5001/api/cache/testkey 200
 ```
 
-The script prints each response code and a short summary of how many `429` responses were returned.
+If you want some sample Redis data to browse, run:
 
-Files added
-- `tests/hit_rate_limit.sh`: simple bash script that issues many parallel curl requests to the API endpoint and tallies HTTP status codes.
+```bash
+bash tests/populate_redis.sh
+```
 
-If you want, I can (A) change the throttling parameters, (B) add a small C# integration test that asserts the 429 behavior, or (C) run the script now and share the results.
+## Logging with Seq
 
-Notes:
-- `ICacheService` in `src/Cache.Core` defines the cache contract.
-- `RedisCacheService` in `src/Cache.Infrastructure` implements Redis-backed caching (StackExchange.Redis).
-- `RequestThrottlingMiddleware` in `src/Cache.Api` demonstrates a simple rate limiter.
-- CI workflow at `.github/workflows/ci.yml` builds and runs tests on push/PR.
+The API uses Serilog for structured logs and sends them to Seq when `Seq__Url` is set.
 
-Next steps you can ask me to run:
-- Run `dotnet restore`/`dotnet build` locally and fix compilation issues.
-- Run tests and a sample request against the running containerized API.
-- Harden throttling, add authentication, or implement Redis clustering/high-availability.
+In Docker Compose, Seq is started with:
+
+- `ACCEPT_EULA=Y`
+- `SEQ_FIRSTRUN_ADMINPASSWORD`
+
+That lets the container initialize cleanly and accept log events from the API.
+
+## Redis Commander
+
+Redis Commander is the easiest way to inspect Redis data from the browser.
+
+Open it here:
+
+```text
+http://localhost:8081
+```
+
+It is handy when you want to:
+
+- check what keys are stored,
+- look at JSON values,
+- delete test data,
+- confirm that POST requests really landed in Redis.
+
+## Files worth knowing about
+
+- `docker-compose.yml` starts Redis, Seq, Redis Commander, and the API.
+- `src/Cache.Api/Program.cs` wires up logging, Swagger, Redis, and middleware.
+- `src/Cache.Api/Controllers/CacheController.cs` contains the cache endpoints.
+- `src/Cache.Api/Middleware/RequestThrottlingMiddleware.cs` handles rate limiting.
+- `src/Cache.Infrastructure/Services/RedisCacheService.cs` is the Redis-backed cache implementation.
+
+## Troubleshooting
+
+- If Swagger does not open, make sure the API is running in Development mode.
+- If Seq stays empty, check that `Seq__Url` is set and restart the API container.
+- If Redis Commander shows nothing, run `bash tests/populate_redis.sh` again and refresh the page.
+- If port 5001 is already in use, change the host port mapping in `docker-compose.yml`.
+
+## Running locally without Docker
+
+You can also run the API directly from the source project:
+
+```bash
+cd src/Cache.Api
+dotnet restore
+dotnet run
+```
+
+## Test scripts
+
+- `tests/hit_rate_limit.sh` sends many POST requests quickly to trigger the throttle.
+- `tests/populate_redis.sh` sends sample POST requests so you can verify data in Redis Commander.
+
